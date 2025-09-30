@@ -63,35 +63,91 @@
     }
 
     // --- 3) Render after CSV loads ---
-    loadSwimLegs().then(rows => {
-      rows.forEach((r, idx) => {
-        // Expected headers (exact): filename,start_date,finish_date,start_time,end_time,start_coordinates,end_coordinates
-        const start = parseLatLon(r.start_coordinates);
-        const end   = parseLatLon(r.end_coordinates);
-        if(!start || !end) return;
+    <!-- --- 3) Render after CSV loads (sorted) --- -->
+<script>
+  // helper: parse lat,lon string
+  function parseLatLon(pair){
+    if(!pair) return null;
+    const [lat, lon] = String(pair).split(',').map(s => Number(s.trim()));
+    if(Number.isNaN(lat) || Number.isNaN(lon)) return null;
+    return [lat, lon];
+  }
 
-        const name = (r.filename && r.filename.trim()) || `Leg ${idx+1}`;
+  // helper: build UTC date from row (handles missing time)
+  function toUtcDate(row){
+    const d = (row.start_date || '').trim();
+    const t = (row.start_time || '00:00:00').trim();
+    if(!d) return null;
+    const iso = `${d}T${t.endsWith('Z') ? t : t + 'Z'}`; // assume UTC
+    const ms = Date.parse(iso);
+    return Number.isNaN(ms) ? null : new Date(ms);
+  }
 
-        const line = L.polyline([start, end], { color:'red', weight:4, opacity:0.9 })
-          .bindPopup(
-            `<strong>${name}</strong><br>
-             ${r.start_date||''} ${r.start_time||''} → ${r.finish_date||''} ${r.end_time||''}<br>
-             <small>Start: ${r.start_coordinates}<br>End: ${r.end_coordinates}</small>`
-          )
-          .addTo(map);
+  // helper: angle from a center (for spatial sort fallback)
+  const CENTER = { lat: 64.9631, lon: -19.0208 }; // Iceland
+  function angleFromCenter(lat, lon){
+    const ang = Math.atan2(lat - CENTER.lat, lon - CENTER.lon); // radians
+    let deg = ang * 180 / Math.PI;         // [-180,180]
+    if (deg < 0) deg += 360;               // [0,360)
+    return deg;
+  }
 
-        legLayers[name] = line;
-        bounds.extend(line.getBounds());
-        addLegRow(name);
-      });
+  loadSwimLegs().then(allRows => {
+    // sort rows: time asc if present, else by angle around island
+    const rows = [...allRows].sort((a,b) => {
+      const aStart = parseLatLon(a.start_coordinates);
+      const bStart = parseLatLon(b.start_coordinates);
 
-      if(bounds.isValid()) map.fitBounds(bounds.pad(0.1));
-      else console.warn('No lines drawn. Check CSV field names and coordinate format.');
-    }).catch(err => {
-      console.error('Failed to load swim legs:', err);
-      alert('Could not load swim legs. Open console for details.');
+      const aDt = toUtcDate(a);
+      const bDt = toUtcDate(b);
+
+      if (aDt && bDt) return aDt - bDt;              // chronological
+      if (aDt && !bDt) return -1;
+      if (!aDt && bDt) return 1;
+
+      // fallback: spatial order
+      if (aStart && bStart) {
+        const aAng = angleFromCenter(aStart[0], aStart[1]);
+        const bAng = angleFromCenter(bStart[0], bStart[1]);
+        return aAng - bAng;                           // clockwise
+      }
+      return 0;
     });
 
+    rows.forEach((r, idx) => {
+      const start = parseLatLon(r.start_coordinates);
+      const end   = parseLatLon(r.end_coordinates);
+      if(!start || !end) return;
+
+      const name = (r.filename && r.filename.trim()) || `Leg ${idx+1}`;
+
+      const line = L.polyline([start, end], { color:'red', weight:4, opacity:0.9 })
+        .bindPopup(
+          `<strong>${name}</strong><br>
+           ${r.start_date||''} ${r.start_time||''} → ${r.finish_date||''} ${r.end_time||''}<br>
+           <small>Start: ${r.start_coordinates}<br>End: ${r.end_coordinates}</small>`
+        )
+        .addTo(map);
+
+      legLayers[name] = line;
+      bounds.extend(line.getBounds());
+
+      const row = document.createElement('div');
+      row.className = 'filter-item';
+      row.innerHTML = `
+        <label>
+          <input type="checkbox" checked onchange="toggleLeg('${name.replace(/'/g,"&#39;")}', this.checked)">
+          ${name}
+        </label>`;
+      listEl.appendChild(row);
+    });
+
+    if(bounds.isValid()) map.fitBounds(bounds.pad(0.1));
+    else console.warn('No lines drawn. Check CSV field names and coordinate format.');
+  }).catch(err => {
+    console.error('Failed to load swim legs:', err);
+    alert('Could not load swim legs. Open console for details.');
+  });
     // --- 4) UI controls ---
     window.toggleLeg = function(id, show){
       const layer = legLayers[id];
